@@ -9,6 +9,10 @@ POST {"utterance": "Echo, what was our annual revenue?", "dsn": "G0911234567890"
   -> {"response": "Our annual revenue was ..."}
 ```
 
+Every reply has a speakable `response`. Failures also include an `error` code, for
+example `{"response": "Sorry, something went wrong on my end. Please try again.",
+"error": "Internal error: RuntimeError"}`.
+
 ## Build the zip
 
 ```bash
@@ -31,16 +35,18 @@ deployment needs. You need `uv` to build it.
      - **Bedrock Agent mode** (guide Part A): set `AGENT_ID`, `AGENT_ALIAS_ID` and
        `BEDROCK_REGION`.
      - **Strands mode** (default when `AGENT_ID` is unset): you can set
-       `KNOWLEDGE_BASE_ID`, `MODEL_ID` (default Claude Sonnet 4.5 inference
-       profile) and `BEDROCK_REGION`. Web search uses DuckDuckGo by default;
-       set `TAVILY_API_KEY` to use Tavily instead.
-     - `VOICE_MODE=false` (either mode) allows longer answers with formatting
-       for text use; leave it unset for the Echo.
+       `KNOWLEDGE_BASE_ID`, `BEDROCK_REGION`, `TIMEZONE` (default
+       `America/New_York`) and `TAVILY_API_KEY` (web search otherwise uses
+       DuckDuckGo).
+     - **Voice vs text:** voice mode is the default. It uses `VOICE_MODEL_ID`
+       (default Claude Haiku 4.5) and short, speech-ready answers.
+       `VOICE_MODE=false` switches to `TEXT_MODEL_ID` (default Claude Sonnet
+       4.5) with longer, formatted answers. `MODEL_ID` overrides both.
 3. **Execution role:** start from the AgentCore Runtime default role. Then add:
    - `bedrock:InvokeAgent` on the agent and its alias (Bedrock Agent mode), or
-   - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the
-     model or inference profile, plus `bedrock:Retrieve` on the Knowledge Base
-     (Strands mode).
+   - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on both
+     the Haiku and Sonnet models and inference profiles, plus `bedrock:Retrieve`
+     on the Knowledge Base (Strands mode).
 4. **Inbound auth:** the device sends `Authorization: Bearer <token>`. Choose a
    **JWT authorizer** with your IdP's discovery URL and allowed audience or
    clients (Cognito, Okta or Auth0). This replaces the starter's

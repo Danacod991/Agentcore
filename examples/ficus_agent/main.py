@@ -11,12 +11,17 @@ Two orchestration modes, selected by environment variables:
 * Bedrock Agent (managed RAG + memory, as in the guide's Part A) - set
   ``AGENT_ID`` and ``AGENT_ALIAS_ID``.
 * Strands (code-controlled, the guide's "Larch" alternative) - used when
-  ``AGENT_ID`` is unset. Claude Sonnet with the voice-friendly instructions,
-  a PST date/time tool, a web search tool (Tavily when ``TAVILY_API_KEY`` is
-  set, otherwise DuckDuckGo) and, if ``KNOWLEDGE_BASE_ID`` is set, a Knowledge
-  Base retrieval tool.
+  ``AGENT_ID`` is unset. Claude with voice-friendly instructions, a date/time
+  tool (``TIMEZONE``, default US Eastern), a web search tool (Tavily when
+  ``TAVILY_API_KEY`` is set, otherwise DuckDuckGo) and, if ``KNOWLEDGE_BASE_ID``
+  is set, a Knowledge Base retrieval tool.
 
-``VOICE_MODE=false`` lifts the one-or-two-sentence limit for text use.
+Voice mode (the default) uses the faster ``VOICE_MODEL_ID`` (Claude Haiku) and
+speech-ready answers. ``VOICE_MODE=false`` switches to ``TEXT_MODEL_ID`` (Claude
+Sonnet) with longer, formatted answers. ``MODEL_ID`` overrides both.
+
+Every reply carries a speakable ``response``, including failures, so the device
+never goes silent; failures also include an ``error`` code.
 """
 
 import json
@@ -40,16 +45,27 @@ AGENT_ID = os.environ.get("AGENT_ID", "")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "")
 KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ.get("AWS_REGION", "us-east-2")
-MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+MODEL_ID = os.environ.get("MODEL_ID", "")
+VOICE_MODEL_ID = os.environ.get("VOICE_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+TIMEZONE = os.environ.get("TIMEZONE", "America/New_York")
 DEFAULT_SESSION_ID = os.environ.get("DEFAULT_SESSION_ID", "550e7910-e397-41d4-a716-456858440000")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 VOICE_MODE = os.environ.get("VOICE_MODE", "true").lower() not in ("false", "0", "no")
 
 VOICE_INSTRUCTIONS = (
-    "You're having a verbal conversation, so make your language clear and easy "
-    "to follow when spoken aloud. LIMIT your responses to a sentence or two "
-    "ALWAYS. Format responses as continuous text without special characters or "
-    "line breaks."
+    "You are a voice assistant for office workers, speaking through a smart "
+    "display. Everything you write is read aloud by text-to-speech. "
+    "LIMIT your responses to a sentence or two ALWAYS, and lead with the answer. "
+    "Write continuous plain text with no markdown, lists, emojis, special "
+    "characters or line breaks. Never say URLs, file paths or email addresses; "
+    "name the source instead, for example 'according to Gartner'. Write numbers, "
+    "dates and units the way a person would say them, for example 'about 2.4 "
+    "million dollars' and 'Tuesday, March 3rd', and round where precision does "
+    "not matter. Spell out abbreviations a listener might not know. If the "
+    "request is ambiguous, ask one short clarifying question instead of "
+    "guessing. If you do not know or a tool fails, say so briefly and suggest "
+    "what the user can try."
 )
 TEXT_INSTRUCTIONS = (
     "You are an office assistant. Answer clearly and concisely. When you use "
@@ -60,12 +76,20 @@ TOOL_INSTRUCTIONS = (
     "are not sure is up to date, and the date/time tool for the current date."
 )
 
+# Spoken when something goes wrong, so the device never goes silent.
+FALLBACK_REPLIES = {
+    "no_utterance": "Sorry, I didn't catch that. Could you say it again?",
+    "throttled": "I'm getting a lot of requests right now. Please try again in a moment.",
+    "access": "I'm not set up to answer that yet. Please ask your administrator to check my permissions.",
+    "default": "Sorry, something went wrong on my end. Please try again.",
+}
+
 app = BedrockAgentCoreApp()
 
 
 def clean_utterance(utterance: str) -> str:
-    """Strip the 'echo' wake word and surrounding punctuation/whitespace."""
-    cleaned = re.sub(r"\becho\b", "", utterance, flags=re.IGNORECASE)
+    """Strip a leading 'Echo' wake word (but keep 'echo' elsewhere) and stray punctuation."""
+    cleaned = re.sub(r"^\s*(?:(?:hey|ok|okay)\s+)?echo\b[\s,.!?]*", "", utterance, flags=re.IGNORECASE)
     cleaned = re.sub(r"^[\s,]+|[\s,]+$", "", cleaned)
     return cleaned.strip()
 
@@ -75,7 +99,10 @@ def clean_agent_response(response: str) -> str:
     if not VOICE_MODE:
         return response.strip()
     cleaned = re.sub(r"\\[nrt]", " ", response)
-    cleaned = re.sub(r"[*_#`>]", "", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)  # [text](url) -> text
+    cleaned = re.sub(r"\(?\b(?:https?://|www\.)\S+", "", cleaned)  # bare URLs
+    cleaned = re.sub(r"^\s*(?:[-*\u2022]|\d{1,2}[.)])\s+", "", cleaned, flags=re.MULTILINE)  # list markers
+    cleaned = re.sub(r"[*_#`>|]", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
@@ -138,14 +165,22 @@ def search_web(query: str, max_results: int = 5) -> list[dict]:
     return [{"title": r.get("title", ""), "url": r.get("href", ""), "content": r.get("body", "")} for r in results]
 
 
+def _model_id() -> str:
+    return MODEL_ID or (VOICE_MODEL_ID if VOICE_MODE else TEXT_MODEL_ID)
+
+
+def _fallback(kind: str, error: str) -> dict:
+    return {"response": FALLBACK_REPLIES[kind], "error": error}
+
+
 def _build_strands_agent():
     from strands import Agent, tool
     from strands.models import BedrockModel
 
     @tool
-    def current_datetime_pst() -> str:
-        """Return the current date and time in Pacific time."""
-        now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    def current_datetime() -> str:
+        """Return the current date and time in the office's local time zone."""
+        now = datetime.now(ZoneInfo(TIMEZONE))
         return now.strftime("%A, %B %d, %Y at %I:%M %p %Z")
 
     @tool
@@ -156,7 +191,7 @@ def _build_strands_agent():
             query: The search query.
         """
         try:
-            results = search_web(query)
+            results = search_web(query, max_results=3 if VOICE_MODE else 5)
         except Exception as error:  # noqa: BLE001 - report to the model instead of failing the turn
             logger.warning("Web search failed: %s", error)
             return f"Web search failed: {error}"
@@ -164,7 +199,7 @@ def _build_strands_agent():
             return "No web results found."
         return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['content']}" for r in results)
 
-    tools = [current_datetime_pst, web_search]
+    tools = [current_datetime, web_search]
 
     if KNOWLEDGE_BASE_ID:
         kb_client = boto3.client("bedrock-agent-runtime", region_name=BEDROCK_REGION)
@@ -187,7 +222,7 @@ def _build_strands_agent():
         tools.append(search_office_knowledge)
 
     return Agent(
-        model=BedrockModel(model_id=MODEL_ID, region_name=BEDROCK_REGION),
+        model=BedrockModel(model_id=_model_id(), region_name=BEDROCK_REGION),
         system_prompt=(VOICE_INSTRUCTIONS if VOICE_MODE else TEXT_INSTRUCTIONS) + TOOL_INSTRUCTIONS,
         tools=tools,
         callback_handler=None,
@@ -199,7 +234,12 @@ def invoke_strands_agent(prompt: str, session_id: str) -> str:
     agent = _strands_agents.get(session_id)
     if agent is None:
         agent = _strands_agents[session_id] = _build_strands_agent()
-    return str(agent(prompt))
+    try:
+        return str(agent(prompt))
+    except Exception:
+        # A failed turn can leave the conversation half-written; start fresh next time.
+        _strands_agents.pop(session_id, None)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +255,9 @@ def invoke(payload: dict, context: RequestContext) -> dict:
 
     dsn = body.get("dsn")
     utterance = body.get("utterance") or body.get("prompt")
-    if not utterance:
+    if not utterance or not clean_utterance(utterance):
         logger.warning("No utterance provided in request")
-        return {"error": "Missing required field: utterance"}
+        return _fallback("no_utterance", "Missing required field: utterance")
 
     cleaned_utterance = clean_utterance(utterance)
     session_id = _session_id(context, dsn)
@@ -231,9 +271,20 @@ def invoke(payload: dict, context: RequestContext) -> dict:
     except ClientError as error:
         error_code = error.response.get("Error", {}).get("Code", "Unknown")
         logger.error("AWS service error: %s", error)
-        return {"error": f"Bedrock error: {error_code}"}
+        if "Throttl" in error_code or error_code == "ServiceQuotaExceededException":
+            kind = "throttled"
+        elif error_code in ("AccessDeniedException", "ResourceNotFoundException", "ValidationException"):
+            kind = "access"
+        else:
+            kind = "default"
+        return _fallback(kind, f"Bedrock error: {error_code}")
+    except Exception as error:  # noqa: BLE001 - always give the device something to say
+        logger.exception("Unexpected error")
+        return _fallback("default", f"Internal error: {type(error).__name__}")
 
     cleaned_response = clean_agent_response(agent_response)
+    if not cleaned_response:
+        return _fallback("default", "Empty agent response")
     logger.info("Response length: %d characters", len(cleaned_response))
     return {"response": cleaned_response}
 
