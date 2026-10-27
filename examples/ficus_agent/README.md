@@ -12,7 +12,7 @@ POST {"utterance": "Echo, what was our annual revenue?", "dsn": "G0911234567890"
 ## Build the zip
 
 ```bash
-./build_zip.sh          # Python 3.12 by default; ./build_zip.sh 3.13 for another runtime
+./build_zip.sh          # Python 3.14 by default; ./build_zip.sh 3.12 for another runtime
 # -> dist/ficus-agent-agentcore.zip
 ```
 
@@ -25,7 +25,7 @@ deployment needs. You need `uv` to build it.
 1. Upload the zip to an S3 bucket in your Region, for example `us-east-2`.
 2. Open the AgentCore console, go to **Runtime**, choose **Host agent**, and select
    **Code upload / S3**. Then set:
-   - **Runtime:** Python 3.12 (it must match the build).
+   - **Runtime:** Python 3.14 (it must match the build).
    - **Entrypoint:** `main.py`
    - **Environment variables:** pick one mode.
      - **Bedrock Agent mode** (guide Part A): set `AGENT_ID`, `AGENT_ALIAS_ID` and

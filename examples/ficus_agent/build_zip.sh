@@ -4,10 +4,10 @@
 # Produces dist/ficus-agent-agentcore.zip with main.py and all dependencies at the
 # zip root, built as Linux ARM64 wheels (AgentCore Runtime runs on Graviton).
 #
-# Usage: ./build_zip.sh [python-version]   (default 3.12)
+# Usage: ./build_zip.sh [python-version]   (default 3.14)
 set -euo pipefail
 
-PY_VERSION="${1:-3.12}"
+PY_VERSION="${1:-3.14}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$HERE/build/package"
 DIST="$HERE/dist"
