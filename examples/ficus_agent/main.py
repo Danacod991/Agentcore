@@ -12,13 +12,18 @@ Two orchestration modes, selected by environment variables:
   ``AGENT_ID`` and ``AGENT_ALIAS_ID``.
 * Strands (code-controlled, the guide's "Larch" alternative) - used when
   ``AGENT_ID`` is unset. Claude Sonnet with the voice-friendly instructions,
-  a PST date/time tool and, if ``KNOWLEDGE_BASE_ID`` is set, a Knowledge Base
-  retrieval tool.
+  a PST date/time tool, a web search tool (Tavily when ``TAVILY_API_KEY`` is
+  set, otherwise DuckDuckGo) and, if ``KNOWLEDGE_BASE_ID`` is set, a Knowledge
+  Base retrieval tool.
+
+``VOICE_MODE=false`` lifts the one-or-two-sentence limit for text use.
 """
 
+import json
 import logging
 import os
 import re
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -37,12 +42,22 @@ KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ.get("AWS_REGION", "us-east-2")
 MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 DEFAULT_SESSION_ID = os.environ.get("DEFAULT_SESSION_ID", "550e7910-e397-41d4-a716-456858440000")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+VOICE_MODE = os.environ.get("VOICE_MODE", "true").lower() not in ("false", "0", "no")
 
 VOICE_INSTRUCTIONS = (
     "You're having a verbal conversation, so make your language clear and easy "
     "to follow when spoken aloud. LIMIT your responses to a sentence or two "
     "ALWAYS. Format responses as continuous text without special characters or "
     "line breaks."
+)
+TEXT_INSTRUCTIONS = (
+    "You are an office assistant. Answer clearly and concisely. When you use "
+    "web search results, synthesize them and cite the source URLs you relied on."
+)
+TOOL_INSTRUCTIONS = (
+    " Use the web_search tool for current events, recent trends or anything you "
+    "are not sure is up to date, and the date/time tool for the current date."
 )
 
 app = BedrockAgentCoreApp()
@@ -57,6 +72,8 @@ def clean_utterance(utterance: str) -> str:
 
 def clean_agent_response(response: str) -> str:
     """Remove newlines/escape sequences and markdown so the response speaks naturally."""
+    if not VOICE_MODE:
+        return response.strip()
     cleaned = re.sub(r"\\[nrt]", " ", response)
     cleaned = re.sub(r"[*_#`>]", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -103,6 +120,24 @@ def invoke_bedrock_agent(prompt: str, session_id: str) -> str:
 _strands_agents: dict = {}
 
 
+def search_web(query: str, max_results: int = 5) -> list[dict]:
+    """Return [{"title", "url", "content"}] from Tavily if configured, else DuckDuckGo."""
+    if TAVILY_API_KEY:
+        request = urllib.request.Request(
+            "https://api.tavily.com/search",
+            data=json.dumps({"query": query, "max_results": max_results}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {TAVILY_API_KEY}"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            results = json.loads(response.read()).get("results", [])
+        return [{"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")} for r in results]
+
+    from ddgs import DDGS
+
+    results = DDGS(timeout=10).text(query, max_results=max_results)
+    return [{"title": r.get("title", ""), "url": r.get("href", ""), "content": r.get("body", "")} for r in results]
+
+
 def _build_strands_agent():
     from strands import Agent, tool
     from strands.models import BedrockModel
@@ -113,7 +148,23 @@ def _build_strands_agent():
         now = datetime.now(ZoneInfo("America/Los_Angeles"))
         return now.strftime("%A, %B %d, %Y at %I:%M %p %Z")
 
-    tools = [current_datetime_pst]
+    @tool
+    def web_search(query: str) -> str:
+        """Search the web for current information, news and trends.
+
+        Args:
+            query: The search query.
+        """
+        try:
+            results = search_web(query)
+        except Exception as error:  # noqa: BLE001 - report to the model instead of failing the turn
+            logger.warning("Web search failed: %s", error)
+            return f"Web search failed: {error}"
+        if not results:
+            return "No web results found."
+        return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['content']}" for r in results)
+
+    tools = [current_datetime_pst, web_search]
 
     if KNOWLEDGE_BASE_ID:
         kb_client = boto3.client("bedrock-agent-runtime", region_name=BEDROCK_REGION)
@@ -137,7 +188,7 @@ def _build_strands_agent():
 
     return Agent(
         model=BedrockModel(model_id=MODEL_ID, region_name=BEDROCK_REGION),
-        system_prompt=VOICE_INSTRUCTIONS,
+        system_prompt=(VOICE_INSTRUCTIONS if VOICE_MODE else TEXT_INSTRUCTIONS) + TOOL_INSTRUCTIONS,
         tools=tools,
         callback_handler=None,
     )
@@ -160,8 +211,6 @@ def invoke(payload: dict, context: RequestContext) -> dict:
     # Accept the API Gateway proxy shape too, so the same test events work.
     body = payload.get("body", payload) if isinstance(payload, dict) else {}
     if isinstance(body, str):
-        import json
-
         body = json.loads(body)
 
     dsn = body.get("dsn")

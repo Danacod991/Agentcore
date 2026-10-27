@@ -4,7 +4,8 @@
 - `bedrock-agentcore` `BedrockAgentCoreApp`: HTTP protocol, `POST /invocations` and `GET /ping` on port 8080.
 - Two orchestration modes chosen by environment variables:
   - Bedrock Agent: `AGENT_ID`, `AGENT_ALIAS_ID`.
-  - Strands (default): `MODEL_ID`, optional `KNOWLEDGE_BASE_ID`.
+  - Strands (default): `MODEL_ID`, optional `KNOWLEDGE_BASE_ID`, optional `TAVILY_API_KEY` (web search falls back to DuckDuckGo).
+  - `VOICE_MODE=false` lifts the one-or-two-sentence limit for text use.
   - `BEDROCK_REGION` (default `us-east-2`) applies to both.
 - Add new agent tools as `@tool` functions inside `_build_strands_agent()` in `main.py`.
 - New dependencies go in `requirements.txt` and must ship Linux ARM64 wheels.

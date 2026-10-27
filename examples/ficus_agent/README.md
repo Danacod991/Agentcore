@@ -32,7 +32,10 @@ deployment needs. You need `uv` to build it.
        `BEDROCK_REGION`.
      - **Strands mode** (default when `AGENT_ID` is unset): you can set
        `KNOWLEDGE_BASE_ID`, `MODEL_ID` (default Claude Sonnet 4.5 inference
-       profile) and `BEDROCK_REGION`.
+       profile) and `BEDROCK_REGION`. Web search uses DuckDuckGo by default;
+       set `TAVILY_API_KEY` to use Tavily instead.
+     - `VOICE_MODE=false` (either mode) allows longer answers with formatting
+       for text use; leave it unset for the Echo.
 3. **Execution role:** start from the AgentCore Runtime default role. Then add:
    - `bedrock:InvokeAgent` on the agent and its alias (Bedrock Agent mode), or
    - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the
