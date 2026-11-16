@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Offline · Voice Assistant</title>
+<style>
+  :root { --bg: #f6f5f2; --text: #1d1d1f; --muted: #6e6e73; --accent: #10a37f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111214; --text: #ececf1; --muted: #9a9aa3; --accent: #19c37d; } }
+  body {
+    margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 16px; text-align: center;
+    background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  img { width: 72px; height: 72px; border-radius: 18px; }
+  p { color: var(--muted); }
+  button { padding: 10px 20px; border-radius: 999px; border: none; background: var(--accent); color: #fff; font: inherit; }
+</style>
+</head>
+<body>
+<div>
+  <img src="/icons/icon.svg" alt="">
+  <h1>You're offline</h1>
+  <p>The assistant needs an internet connection to hear and answer you.</p>
+  <button onclick="location.reload()">Try again</button>
+</div>
+</body>
+</html>

@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Assistant">
 <title>Voice Assistant</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <style>
   :root {
     --bg: #f6f5f2; --surface: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
@@ -16,12 +25,19 @@
     }
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-    display: flex; justify-content: center;
+    display: flex; justify-content: center; overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
   }
-  main { width: 100%; max-width: 640px; padding: 24px 16px; display: flex; flex-direction: column; gap: 20px; }
+  /* Fill the screen exactly (100dvh tracks mobile browser chrome) and keep clear of notches and home bars. */
+  main {
+    width: 100%; max-width: 640px; height: 100dvh; display: flex; flex-direction: column; gap: 20px;
+    padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  }
   header { text-align: center; }
   h1 { margin: 0; font-size: 1.4rem; font-weight: 600; }
   #status { color: var(--muted); font-size: .9rem; min-height: 1.4em; }
@@ -36,8 +52,8 @@
   #mic svg { width: 44px; height: 44px; }
   #mic.live { background: var(--accent); color: #fff; box-shadow: 0 0 0 calc(6px + var(--level, 0) * 26px) var(--accent-soft); }
   #log {
-    flex: 1; min-height: 240px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
-    padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; max-height: 50vh;
+    flex: 1; min-height: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
   }
   #log:empty::before { content: "Tap the mic and say hello."; color: var(--muted); margin: auto; }
   .msg { padding: 8px 12px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -179,6 +195,14 @@ function openSocket() {
   });
 }
 
+// When a password is set and the session cookie has expired, the page redirects to /login.
+async function signedOut() {
+  try {
+    const res = await fetch("/", { redirect: "manual", cache: "no-store" });
+    return res.type === "opaqueredirect";
+  } catch { return false; }
+}
+
 async function start() {
   setStatus("Connecting…");
   try {
@@ -198,6 +222,7 @@ async function start() {
     micBtn.setAttribute("aria-label", "Stop talking");
   } catch (err) {
     stop();
+    if (await signedOut()) return void location.assign("/login");
     setStatus(err.message || String(err), true);
   }
 }
@@ -214,6 +239,11 @@ function stop() {
 }
 
 micBtn.addEventListener("click", () => (micStream ? stop() : start()));
+
+// Release the mic when the app is backgrounded on a phone, so it isn't left listening.
+document.addEventListener("visibilitychange", () => { if (document.hidden && micStream) stop(); });
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
 document.getElementById("textForm").addEventListener("submit", async e => {
   e.preventDefault();

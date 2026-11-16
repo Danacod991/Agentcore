@@ -1,0 +1,20 @@
+# Render Blueprint for the OpenAI voice assistant (examples/openai_voice_assistant).
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo. You'll be asked for the two secrets.
+services:
+  - type: web
+    name: voice-assistant
+    runtime: docker
+    plan: free
+    dockerfilePath: ./examples/openai_voice_assistant/Dockerfile
+    dockerContext: ./examples/openai_voice_assistant
+    healthCheckPath: /ping
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: ASSISTANT_NAME
+        value: Nova
+      - key: OPENAI_VOICE
+        value: marin

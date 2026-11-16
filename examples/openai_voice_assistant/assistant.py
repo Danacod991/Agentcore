@@ -1,7 +1,8 @@
 """Personal voice assistant on Bedrock AgentCore Runtime, powered by the OpenAI Realtime API.
 
 Endpoints:
-    GET  /             Browser voice client (push the mic button and talk).
+    GET  /             Browser voice client (push the mic button and talk). Installable as a phone app.
+    GET  /login        Sign-in page, used only when APP_PASSWORD is set (see auth.py).
     WS   /ws           Voice bridge: browser <-> this server <-> OpenAI Realtime.
     POST /invocations  Text mode: {"prompt": "..."} -> {"response": "...", "tools_used": [...]}.
     GET  /ping         AgentCore health check.
@@ -24,26 +25,62 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import parse_qs
 
+import auth
 import realtime
+from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, RedirectResponse, Response
+from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from bedrock_agentcore import BedrockAgentCoreApp
 
 logger = logging.getLogger("voice_assistant")
 
-app = BedrockAgentCoreApp()
-INDEX_HTML = Path(__file__).parent / "static" / "index.html"
+app = BedrockAgentCoreApp(middleware=[Middleware(auth.PasswordMiddleware)])
+STATIC = Path(__file__).parent / "static"
 
 
-async def index(request: Request) -> FileResponse:
-    """Serve the browser voice client."""
-    return FileResponse(INDEX_HTML)
+def static_page(name: str, media_type: Optional[str] = None, headers: Optional[Dict[str, str]] = None) -> Any:
+    """Route handler that serves one file from ``static/``."""
+
+    async def handler(request: Request) -> FileResponse:
+        return FileResponse(STATIC / name, media_type=media_type, headers=headers)
+
+    return handler
 
 
-app.add_route("/", index, methods=["GET"])
+async def login(request: Request) -> Response:
+    """Check the submitted password and set the session cookie."""
+    if not auth.password():
+        return RedirectResponse("/", status_code=303)
+    form = parse_qs((await request.body()).decode())
+    if not auth.check_password(form.get("password", [""])[0]):
+        return RedirectResponse("/login?error=1", status_code=303)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.session_token(auth.password()),
+        max_age=auth.COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="strict",
+        # Hosts like Render and Fly terminate TLS and forward plain HTTP, so trust their header.
+        secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https",
+    )
+    return response
+
+
+app.add_route("/", static_page("index.html"), methods=["GET"])
+app.add_route("/login", static_page("login.html"), methods=["GET"])
+app.add_route("/login", login, methods=["POST"])
+app.add_route("/manifest.webmanifest", static_page("manifest.webmanifest", "application/manifest+json"))
+# The service worker must be served from the root so it can control the whole app.
+app.add_route("/sw.js", static_page("sw.js", "text/javascript", {"Cache-Control": "no-cache"}))
+app.add_route("/offline.html", static_page("offline.html"))
+app.add_route("/favicon.ico", static_page("favicon.ico"))
+app.mount("/icons", StaticFiles(directory=STATIC / "icons"), name="icons")
 
 
 @app.entrypoint
@@ -133,4 +170,6 @@ async def voice(websocket: WebSocket, context: Any) -> None:
 
 
 if __name__ == "__main__":
+    if not auth.password():
+        logger.warning("APP_PASSWORD is not set: anyone who can reach this server can use your OpenAI key.")
     app.run(port=int(os.environ.get("PORT", "8080")))

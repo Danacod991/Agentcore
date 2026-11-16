@@ -21,6 +21,8 @@ instructions and tools, relays audio both ways, and runs tool calls itself.
   - `get_weather`: current weather and today's forecast, from Open-Meteo (no key needed).
   - `save_note`, `list_notes` and `delete_note`: personal memory kept in a JSON file.
 - Text mode on `POST /invocations`, so `agentcore invoke` and scripts work too.
+- Installable on your phone's home screen (a PWA) with its own icon and a full-screen layout.
+- Optional password, so you can put it on a public URL without others spending your OpenAI credit.
 
 ## Run locally
 
@@ -46,6 +48,7 @@ curl -s localhost:8080/invocations -H 'content-type: application/json' \
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | (required) | Your OpenAI API key |
+| `APP_PASSWORD` | (off) | Password for the web app. Always set it on a public URL |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime` | Realtime model |
 | `OPENAI_VOICE` | `marin` | Voice (for example `cedar`, `alloy`, `verse`) |
 | `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-mini-transcribe` | Model for the user-side transcripts |
@@ -61,19 +64,73 @@ Add a JSON schema to `TOOL_SCHEMAS` and a function to `TOOL_HANDLERS` in `tools.
 Handlers are plain synchronous functions. They run in a worker thread and return a dict, which is
 sent back to the model as JSON. Errors are reported to the model so it can explain them to the user.
 
+## Deploy as a web app (no AWS needed)
+
+The app is a single Docker container, so any host that runs containers and supports WebSockets works.
+
+### Render (one click)
+
+`render.yaml` at the repository root is a Render Blueprint.
+
+1. Push this repository to GitHub.
+2. In the Render dashboard choose **New → Blueprint** and pick the repository.
+3. When asked, enter `OPENAI_API_KEY` and an `APP_PASSWORD` of your choice.
+4. Open the `https://voice-assistant-….onrender.com` URL Render gives you and sign in.
+
+Render's free plan sleeps after 15 minutes without traffic, so the first visit after a break takes
+about a minute to load. Free services have no persistent disk, so notes reset on each deploy. For
+lasting notes, use a paid plan and add a disk mounted at `/data`.
+
+### Fly.io
+
+```bash
+cd examples/openai_voice_assistant
+fly launch --no-deploy
+fly secrets set OPENAI_API_KEY=sk-... APP_PASSWORD=choose-one
+fly volumes create data --size 1
+fly deploy
+```
+
+To keep notes, add a `[mounts]` section with `source = "data"` and `destination = "/data"` to the
+generated `fly.toml` before deploying.
+
+### Railway or any other container host
+
+Point the host at `examples/openai_voice_assistant/Dockerfile`. Set `OPENAI_API_KEY` and
+`APP_PASSWORD`. The app listens on `$PORT` (default 8080) and its health check is `/ping`.
+
+## Install it on your phone
+
+Open your deployed URL (it must be HTTPS) and sign in, then:
+
+- **iPhone (Safari):** tap Share, then **Add to Home Screen**.
+- **Android (Chrome):** tap ⋮, then **Install app** or **Add to Home screen**.
+
+It opens full screen like a native app and stays signed in for 90 days. Allow microphone access
+the first time you tap the mic. The mic turns off when you leave the app.
+
 ## Deploy to AgentCore Runtime
 
-The `Dockerfile` builds an ARM64 image that serves `/ping`, `/invocations` and `/ws` on port 8080,
-as AgentCore Runtime expects. Using the [starter toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit):
+The `Dockerfile` serves `/ping`, `/invocations` and `/ws` on port 8080, as AgentCore Runtime expects.
+AgentCore needs an ARM64 image. Leave `APP_PASSWORD` unset there, because AgentCore authenticates
+callers itself. Using the [starter toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit):
 
 ```bash
 agentcore configure --entrypoint assistant.py
 agentcore launch --env OPENAI_API_KEY=sk-...
 ```
 
-For production, keep the key in AWS Secrets Manager or AgentCore Identity rather than a plain
+For production on AWS, keep the key in AWS Secrets Manager or AgentCore Identity rather than a plain
 environment variable. Runtime containers are ephemeral, so point `ASSISTANT_NOTES_PATH` at durable
 storage, or swap the notes tools for AgentCore Memory (`bedrock_agentcore.memory`).
+
+## How sign-in works
+
+When `APP_PASSWORD` is set, browsers sign in once at `/login` and get an HttpOnly cookie derived
+from the password. Changing the password signs everyone out. Scripts can send
+`Authorization: Bearer <APP_PASSWORD>` instead. The health check, login page, icons and manifest
+stay public so phones can show the install prompt. Everything else, including the `/ws` voice
+connection, needs the cookie.
 
 ## Tests
 

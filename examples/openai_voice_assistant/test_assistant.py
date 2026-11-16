@@ -7,6 +7,7 @@ import asyncio
 import json
 import socket
 
+import auth
 import httpx
 import pytest
 import realtime
@@ -133,3 +134,44 @@ async def test_run_tool_reports_errors():
     assert "Unknown tool" in json.loads(await tools.run_tool("nope", "{}"))["error"]
     assert json.loads(await tools.run_tool("get_current_time", '{"timezone": "Mars/Base"}'))["error"]
     assert "iso" in json.loads(await tools.run_tool("get_current_time", "{}"))
+
+
+async def test_pwa_files_served(servers):
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{servers}") as client:
+        manifest = await client.get("/manifest.webmanifest")
+        assert manifest.headers["content-type"].startswith("application/manifest+json")
+        for icon in manifest.json()["icons"]:
+            assert (await client.get(icon["src"])).status_code == 200
+        assert (await client.get("/sw.js")).headers["content-type"].startswith("text/javascript")
+        assert (await client.get("/offline.html")).status_code == 200
+
+
+async def test_password_protects_app(servers, monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "open sesame")
+    base = f"http://127.0.0.1:{servers}"
+    async with httpx.AsyncClient(base_url=base) as client:
+        assert (await client.get("/")).headers["location"] == "/login"
+        assert (await client.post("/invocations", json={"prompt": "hi"})).status_code == 401
+        for public in ("/ping", "/login", "/manifest.webmanifest", "/sw.js", "/icons/icon-192.png"):
+            assert (await client.get(public)).status_code == 200, public
+        with pytest.raises(websockets.InvalidStatus):
+            await websockets.connect(f"ws://127.0.0.1:{servers}/ws")
+
+        wrong = await client.post("/login", data={"password": "nope"})
+        assert wrong.headers["location"] == "/login?error=1"
+        right = await client.post("/login", data={"password": "open sesame"})
+        assert right.headers["location"] == "/"
+        assert "httponly" in right.headers["set-cookie"].lower()
+        assert (await client.get("/")).status_code == 200
+
+        cookie = f"{auth.COOKIE_NAME}={client.cookies[auth.COOKIE_NAME]}"
+        async with websockets.connect(f"ws://127.0.0.1:{servers}/ws", additional_headers={"Cookie": cookie}) as ws:
+            assert json.loads(await ws.recv()) == {"type": "ready"}
+
+        bearer = {"Authorization": "Bearer open sesame"}
+        response = await httpx.AsyncClient().post(f"{base}/invocations", json={"prompt": "hi"}, headers=bearer)
+        assert response.json()["response"] == "Saved!"
+
+    monkeypatch.setenv("APP_PASSWORD", "changed")
+    async with httpx.AsyncClient(base_url=base, cookies={auth.COOKIE_NAME: client.cookies[auth.COOKIE_NAME]}) as c2:
+        assert (await c2.get("/")).status_code == 303
