@@ -14,14 +14,17 @@ VOICE = os.environ.get("OPENAI_VOICE", "marin")
 TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
 ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Nova")
 
+# Voices the browser may pick from; anything else falls back to VOICE.
+VOICES = ("marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
+
 # The Realtime API streams 16-bit little-endian mono PCM at 24 kHz in both directions.
 SAMPLE_RATE = 24000
 
 
-def instructions() -> str:
+def instructions(name: str = "") -> str:
     """System prompt for the assistant, rebuilt per session so the date is current."""
     return (
-        f"You are {ASSISTANT_NAME}, a warm, upbeat personal voice assistant. "
+        f"You are {name or ASSISTANT_NAME}, a warm, upbeat personal voice assistant. "
         f"Today is {datetime.now().astimezone():%A, %B %d %Y}. "
         "Keep spoken replies short and conversational: one to three sentences unless the user asks for detail. "
         "Never read out URLs, markdown, or long lists; summarise instead. "
@@ -31,12 +34,15 @@ def instructions() -> str:
     )
 
 
-def session_config(audio: bool = True) -> Dict[str, Any]:
-    """Build a ``session.update`` event for a voice (audio) or text-only session."""
+def session_config(audio: bool = True, voice: str = "", name: str = "") -> Dict[str, Any]:
+    """Build a ``session.update`` event for a voice (audio) or text-only session.
+
+    ``voice`` and ``name`` are per-session overrides chosen in the browser settings.
+    """
     session: Dict[str, Any] = {
         "type": "realtime",
         "model": MODEL,
-        "instructions": instructions(),
+        "instructions": instructions(name[:40].strip()),
         "output_modalities": ["audio"] if audio else ["text"],
         "tools": TOOL_SCHEMAS,
         "tool_choice": "auto",
@@ -50,7 +56,7 @@ def session_config(audio: bool = True) -> Dict[str, Any]:
                 "noise_reduction": {"type": "near_field"},
                 "turn_detection": {"type": "semantic_vad", "create_response": True, "interrupt_response": True},
             },
-            "output": {"format": pcm, "voice": VOICE},
+            "output": {"format": pcm, "voice": voice if voice in VOICES else VOICE},
         }
     return {"type": "session.update", "session": session}
 
@@ -107,11 +113,11 @@ async def handle_tool_calls(upstream: Any, response_done: Dict[str, Any]) -> Lis
     return [call["name"] for call in calls]
 
 
-async def ask_text(prompt: str) -> Dict[str, Any]:
-    """Run a single text-in, text-out turn (used by the ``/invocations`` entrypoint)."""
+async def ask_text(prompt: str, name: str = "") -> Dict[str, Any]:
+    """Run a single text-in, text-out turn (used by the text endpoints)."""
     upstream = await connect()
     try:
-        await send(upstream, session_config(audio=False))
+        await send(upstream, session_config(audio=False, name=name))
         await send_user_text(upstream, prompt)
         text: List[str] = []
         tools_used: List[str] = []
