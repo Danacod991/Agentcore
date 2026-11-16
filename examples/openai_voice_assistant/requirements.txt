@@ -1,0 +1,2 @@
+bedrock-agentcore
+websockets>=14.0
