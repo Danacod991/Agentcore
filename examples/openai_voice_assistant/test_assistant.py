@@ -23,11 +23,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+# Every client event the fake server receives, so tests can inspect what was sent to OpenAI.
+RECEIVED = []
+
+
 async def fake_openai(ws):
     """Minimal stand-in for the Realtime API: one tool call, then a spoken/text answer."""
     tool_round_done = False
     async for raw in ws:
         event = json.loads(raw)
+        RECEIVED.append(event)
         kind = event["type"]
         if kind == "session.update":
             ws.session = event["session"]
@@ -175,3 +180,57 @@ async def test_password_protects_app(servers, monkeypatch):
     monkeypatch.setenv("APP_PASSWORD", "changed")
     async with httpx.AsyncClient(base_url=base, cookies={auth.COOKIE_NAME: client.cookies[auth.COOKIE_NAME]}) as c2:
         assert (await c2.get("/")).status_code == 303
+
+
+async def test_settings_and_history_reach_openai(servers):
+    RECEIVED.clear()
+    history = [
+        {"role": "user", "text": "My name is Sam"},
+        {"role": "tool", "text": "save_note"},
+        {"role": "assistant", "text": "Nice to meet you, Sam!"},
+    ]
+    async with websockets.connect(f"ws://127.0.0.1:{servers}/ws?voice=cedar&name=Jarvis") as ws:
+        assert json.loads(await ws.recv()) == {"type": "ready"}
+        await ws.send(json.dumps({"type": "history", "messages": history}))
+        await ws.send(json.dumps({"type": "text", "text": "What's my name?"}))
+        await asyncio.sleep(0.2)
+
+    session = next(e["session"] for e in RECEIVED if e["type"] == "session.update")
+    assert session["audio"]["output"]["voice"] == "cedar"
+    assert session["instructions"].startswith("You are Jarvis,")
+    items = [e["item"] for e in RECEIVED if e["type"] == "conversation.item.create"]
+    assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in items] == [
+        ("user", "input_text", "My name is Sam"),
+        ("assistant", "output_text", "Nice to meet you, Sam!"),
+        ("user", "input_text", "What's my name?"),
+    ]
+
+
+async def test_unknown_voice_falls_back_to_default(servers):
+    RECEIVED.clear()
+    async with websockets.connect(f"ws://127.0.0.1:{servers}/ws?voice=not-a-voice") as ws:
+        await ws.recv()
+    session = next(e["session"] for e in RECEIVED if e["type"] == "session.update")
+    assert session["audio"]["output"]["voice"] == realtime.VOICE
+
+
+async def test_notes_and_config_api(servers):
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{servers}") as client:
+        config = (await client.get("/api/config")).json()
+        assert config["voice"] in config["voices"] and config["name"]
+
+        assert (await client.get("/api/notes")).json() == {"notes": []}
+        assert (await client.post("/api/notes", json={"text": "  "})).status_code == 400
+        created = await client.post("/api/notes", json={"text": "Coffee, black"})
+        assert created.status_code == 201
+        note_id = created.json()["saved"]["id"]
+        assert [n["text"] for n in (await client.get("/api/notes")).json()["notes"]] == ["Coffee, black"]
+        assert (await client.delete(f"/api/notes/{note_id}")).status_code == 200
+        assert (await client.delete(f"/api/notes/{note_id}")).status_code == 404
+
+
+async def test_notes_api_requires_sign_in(servers, monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "pw")
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{servers}") as client:
+        assert (await client.get("/api/notes")).status_code == 401
+        assert (await client.get("/api/notes", headers={"Authorization": "Bearer pw"})).status_code == 200

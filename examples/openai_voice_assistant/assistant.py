@@ -4,12 +4,17 @@ Endpoints:
     GET  /             Browser voice client (push the mic button and talk). Installable as a phone app.
     GET  /login        Sign-in page, used only when APP_PASSWORD is set (see auth.py).
     WS   /ws           Voice bridge: browser <-> this server <-> OpenAI Realtime.
+                       Optional query params ?voice=<voice>&name=<assistant name> override the defaults.
+    GET  /api/config   Voices to choose from and the server defaults, for the settings panel.
+    GET  /api/notes    Saved notes; POST {"text": ...} adds one, DELETE /api/notes/{id} removes one.
     POST /invocations  Text mode: {"prompt": "..."} -> {"response": "...", "tools_used": [...]}.
     GET  /ping         AgentCore health check.
 
 Browser protocol on /ws (JSON messages):
     client -> server  {"type": "audio", "audio": <base64 pcm16 24kHz mono>}
                       {"type": "text", "text": "..."}
+                      {"type": "history", "messages": [{"role": "user" | "assistant", "text": "..."}]}
+                                    earlier turns to continue a past conversation
     server -> client  {"type": "ready"}
                       {"type": "audio", "audio": <base64 pcm16 24kHz mono>}
                       {"type": "transcript", "role": "user" | "assistant", "delta" | "text": "...", "final": bool}
@@ -29,9 +34,10 @@ from urllib.parse import parse_qs
 
 import auth
 import realtime
+import tools
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -72,7 +78,31 @@ async def login(request: Request) -> Response:
     return response
 
 
+async def config(request: Request) -> JSONResponse:
+    """Options for the settings panel."""
+    return JSONResponse({"voices": realtime.VOICES, "voice": realtime.VOICE, "name": realtime.ASSISTANT_NAME})
+
+
+async def notes(request: Request) -> JSONResponse:
+    """List notes (GET) or add one (POST) for the notes panel."""
+    if request.method == "POST":
+        text = str((await request.json()).get("text", "")).strip()
+        if not text:
+            return JSONResponse({"error": "Note text is required."}, status_code=400)
+        return JSONResponse(await asyncio.to_thread(tools.save_note, text[:2000]), status_code=201)
+    return JSONResponse(await asyncio.to_thread(tools.list_notes))
+
+
+async def delete_note(request: Request) -> JSONResponse:
+    """Remove one note by id."""
+    result = await asyncio.to_thread(tools.delete_note, request.path_params["note_id"])
+    return JSONResponse(result, status_code=404 if "error" in result else 200)
+
+
 app.add_route("/", static_page("index.html"), methods=["GET"])
+app.add_route("/api/config", config, methods=["GET"])
+app.add_route("/api/notes", notes, methods=["GET", "POST"])
+app.add_route("/api/notes/{note_id:int}", delete_note, methods=["DELETE"])
 app.add_route("/login", static_page("login.html"), methods=["GET"])
 app.add_route("/login", login, methods=["POST"])
 app.add_route("/manifest.webmanifest", static_page("manifest.webmanifest", "application/manifest+json"))
@@ -89,7 +119,7 @@ async def invoke(payload: Dict[str, Any]) -> Dict[str, Any]:
     prompt = (payload or {}).get("prompt")
     if not prompt:
         return {"error": 'Send a JSON body like {"prompt": "What\'s the weather in Paris?"}'}
-    return await realtime.ask_text(prompt)
+    return await realtime.ask_text(prompt, name=str(payload.get("name", "")))
 
 
 def translate_upstream_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -121,6 +151,8 @@ async def pump_browser_to_openai(websocket: WebSocket, upstream: Any) -> None:
             await realtime.send(upstream, {"type": "input_audio_buffer.append", "audio": message["audio"]})
         elif kind == "text" and message.get("text", "").strip():
             await realtime.send_user_text(upstream, message["text"].strip())
+        elif kind == "history":
+            await realtime.restore_history(upstream, message.get("messages", []))
 
 
 async def pump_openai_to_browser(websocket: WebSocket, upstream: Any) -> None:
@@ -150,7 +182,9 @@ async def voice(websocket: WebSocket, context: Any) -> None:
 
     tasks = []
     try:
-        await realtime.send(upstream, realtime.session_config(audio=True))
+        params = websocket.query_params
+        session = realtime.session_config(audio=True, voice=params.get("voice", ""), name=params.get("name", ""))
+        await realtime.send(upstream, session)
         tasks = [
             asyncio.create_task(pump_browser_to_openai(websocket, upstream)),
             asyncio.create_task(pump_openai_to_browser(websocket, upstream)),

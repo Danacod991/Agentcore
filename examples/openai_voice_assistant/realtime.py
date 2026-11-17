@@ -90,6 +90,31 @@ async def send_user_text(upstream: Any, text: str) -> None:
     await send(upstream, {"type": "response.create"})
 
 
+# Limits for replaying a past conversation into a new session, to bound cost and latency.
+HISTORY_MAX_MESSAGES = 30
+HISTORY_MAX_CHARS = 2000
+
+
+async def restore_history(upstream: Any, messages: List[Dict[str, Any]]) -> int:
+    """Replay earlier user/assistant turns as text so a new session can continue a past conversation.
+
+    Returns the number of messages restored. Nothing is sent to the model until the user speaks.
+    """
+    turns = [m for m in messages if m.get("role") in ("user", "assistant") and str(m.get("text", "")).strip()]
+    turns = turns[-HISTORY_MAX_MESSAGES:]
+    for turn in turns:
+        content_type = "input_text" if turn["role"] == "user" else "output_text"
+        text = str(turn["text"])[:HISTORY_MAX_CHARS]
+        await send(
+            upstream,
+            {
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": turn["role"], "content": [{"type": content_type, "text": text}]},
+            },
+        )
+    return len(turns)
+
+
 async def handle_tool_calls(upstream: Any, response_done: Dict[str, Any]) -> List[str]:
     """Run every function call in a finished response, then request a follow-up response.
 

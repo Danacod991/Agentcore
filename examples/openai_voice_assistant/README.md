@@ -21,6 +21,12 @@ instructions and tools, relays audio both ways, and runs tool calls itself.
   - `get_weather`: current weather and today's forecast, from Open-Meteo (no key needed).
   - `save_note`, `list_notes` and `delete_note`: personal memory kept in a JSON file.
 - Text mode on `POST /invocations`, so `agentcore invoke` and scripts work too.
+- Panels for:
+  - **Settings:** choose the assistant's name and voice. These are saved per device.
+  - **Notes:** see, add and delete what the assistant remembers about you.
+  - **History:** past conversations, saved in the browser. Open one to reread it or to continue it;
+    continuing replays the earlier turns so the assistant has the context. Reopening the mic within
+    30 minutes continues the current conversation automatically.
 - Installable on your phone's home screen (a PWA) with its own icon and a full-screen layout.
 - Optional password, so you can put it on a public URL without others spending your OpenAI credit.
 
@@ -140,9 +146,19 @@ The tests run the whole bridge against a fake Realtime server, so they need no k
 pytest test_assistant.py
 ```
 
+## HTTP API used by the panels
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/config` | Available voices plus the default voice and name |
+| `GET /api/notes` | List saved notes |
+| `POST /api/notes` with `{"text": "..."}` | Add a note |
+| `DELETE /api/notes/{id}` | Delete a note |
+
 ## Browser protocol (`/ws`)
 
 | Direction | Message |
 | --- | --- |
-| client to server | `{"type": "audio", "audio": "<base64 PCM16, 24 kHz mono>"}` and `{"type": "text", "text": "..."}` |
+| connect | `/ws?voice=<voice>&name=<assistant name>`. Both are optional and fall back to the server defaults |
+| client to server | `{"type": "audio", "audio": "<base64 PCM16, 24 kHz mono>"}`, `{"type": "text", "text": "..."}` and `{"type": "history", "messages": [{"role": "user", "text": "..."}]}` |
 | server to client | `ready`, `audio`, `transcript` (`role`, `delta` or `text`, `final`), `interrupt`, `tool`, `response_done`, `error` |
